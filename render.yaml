@@ -1,0 +1,22 @@
+# Render Blueprint — deploys the MCQ Practice app as a free static site.
+# Usage: In Render, choose "New +" -> "Blueprint" and point it at this repo,
+# or create a Static Site manually with these same settings.
+
+services:
+  - type: web
+    name: mcq-practice
+    runtime: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    # SPA fallback: serve index.html for unknown paths
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
