@@ -68,7 +68,9 @@ export function normaliseQuestion(raw: RawLlmQuestion): { q: LlmQuestion | null;
     let t = typeof o?.text === 'string' ? o.text.replace(/\s+/g, ' ').trim() : ''
     if (!t) { issues.push(`empty option ${key}`); continue }
     // Correct answer accidentally left inside the option text — split it out.
-    const tail = /(?:\b(?:ans(?:wer)?|correct(?:\s+ans(?:wer)?)?)\s*[:\-–]+\s*|\bans\b\s*)\(?([A-Ha-h])\)?\s*\.?$/i.exec(t)
+    // Two shapes: bare letter tail ("Athens Answer: C") and letter+text tail ("Tables Answer: D. Tables" —
+    // the text after the letter is the option's own wording); both must be stripped from the option.
+    const tail = /(?:\b(?:ans(?:wer)?|correct(?:\s+ans(?:wer)?)?)\s*[:\-–]+\s*|\bans\b\s*)\(?([A-Ha-h])\)?\s*(?:[).:]\s*\S.*)?[.\s]*$/i.exec(t)
     if (tail) {
       t = t.slice(0, tail.index).replace(/[\s,.;]+$/, '').trim()
       embedded = normaliseKey(tail[1])
@@ -76,6 +78,13 @@ export function normaliseQuestion(raw: RawLlmQuestion): { q: LlmQuestion | null;
         issues.push(`answer "${tail[1]}" was embedded at the end of option ${key} — separated automatically`)
       } else {
         t = `${t} ${tail[0].trim()}`.replace(/\s+/g, ' ').trim() // not a letter after all — restore text
+      }
+    } else if (/\b(?:ans(?:wer)?|correct)\b/i.test(t)) {
+      // guard against mid-text answers the first pass can't see (belt & braces)
+      const mid = /\s*(?:ans(?:wer)?|correct(?:\s+ans(?:wer)?)?)\s*[:\-–]\s*\(?([A-Ha-h])\)?/ig.exec(t)
+      if (mid) {
+        const k = normaliseKey(mid[1])
+        if (k) { t = t.slice(0, mid.index).trim(); embedded = k; issues.push(`answer "${mid[1]}" was embedded inside option ${key} — separated automatically`) }
       }
     }
     options.push({ key, text: t })
@@ -124,7 +133,9 @@ Rules:
 - NEVER invent, complete, rewrite or paraphrase content. Preserve original wording exactly, minus page headers/footers/page numbers.
 - Each question object: {"number": printed question number as integer or null, "text": question statement WITHOUT the number prefix and WITHOUT any options, "options": [{"key":"A","text":"..."}, ...], "answer": correct option letter as "A"/"B"/"C"/"D" or null}.
 - "answer" must be the LETTER only, never the option text.
-- CRITICAL: the correct answer is often written on the same line as the last option, e.g. "(D) Athens  Answer: C" or "(D) Rome Ans B". In that case the option text must be exactly the option's own text, and "Answer: X" must go ONLY in the "answer" field. Never keep "answer"/"Ans" inside an option's text.
+- CRITICAL: the correct answer is often written on its own line or on the same line as the last option, e.g. "Answer: D. Tables" or "(D) Athens  Answer: C". The option text must be EXACTLY the option's own text — never append or copy the answer text into any option. "Answer: D. Tables" means: option D keeps its original text ("Tables"), and "D" goes ONLY in the "answer" field. The words after the letter in an answer line are the OPTION's text, not part of the option.
+- Similarly, never include "Answer", "Ans", "Correct answer" or any key notation inside an option's text. If you find yourself writing an option whose text contains "Answer", re-read this rule.
+- After extraction, SELF-CHECK every option: if any option's text contains the substring "Answer" or "Ans" or ends with a key-style letter token, strip it and move the letter into the "answer" field. This check is mandatory.
 - Normalise option keys to A, B, C, D (E, F... if more than 4). "a." "(a)" "1)" inside a question are option letters. Keep option text exactly as printed.
 - If the text also contains a separate answer-key block (e.g. "ANSWER KEY 1. B 2. D"), use it to fill "answer" by matching printed question numbers.
 - If a question has no discoverable answer, set "answer" to null. NEVER guess.

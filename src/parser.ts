@@ -27,8 +27,10 @@ export interface ParseOutput {
 
 const OPT_RE = /^(?:\(([A-Ha-h])\)|([A-Ha-h]))[).:\-]?\s+(.*)$/ // "(A) foo" | "A. foo" | "A) foo" (separator optional for the parenthesised form)
 const NUM_RE = /^(\d{1,4})[).:\-]\s*(.+)$/ // "1. foo" | "1) foo" | "1: foo" | "1- foo"
-const ANS_TAIL_RE = /(?:ANS(?:WER)?|CORRECT(?:\s+(?:ANSWER|OPTION))?)\s*[:\-–]\s*\(?([A-Ha-h])\)?\s*\.?$/i
-const ANS_ONLY_RE = /^(?:ANS(?:WER)?|CORRECT(?:\s+(?:ANSWER)?)?)\s*[:\-–]\s*\(?([A-Ha-h])\)?\s*\.?$/i
+const ANS_TAIL_RE = /(?:ANS(?:WER)?|CORRECT(?:\s+(?:ANSWER|OPTION))?)\s*[:\-–]\s*\(?([A-Ha-h])\)?\s*\.?(?:\s|$)/i
+const ANS_ONLY_RE = /^(?:ANS(?:WER)?|CORRECT(?:\s+(?:ANSWER)?)?)\s*[:\-–]\s*\(?([A-Ha-h])\)?\s*\.?(?:\s.*)?$/i
+// full statement key line: "Answer: B. @OneToOne" / "Answer: D – Tables" (letter followed by the option text)
+const ANS_SENTENCE_RE = /^(?:ANS(?:WER)?|CORRECT(?:\s+(?:ANSWER)?)?)\s*[:\-–]\s*\(?([A-Ha-h])\)?\s*[).:]\s*(.+)$/i
 const KEY_BLOCK_RE = /^\s*(ANSWER\s*KEY|ANSWERS?|KEY|CORRECT\s+ANSWERS?)\s*:?\s*$/i
 
 interface RawQuestion {
@@ -40,6 +42,7 @@ interface RawQuestion {
   page: number
   pageEnd: number
   resolvedKey: string | null
+  ansSentenceText?: string
 }
 
 export function parseQuestions(lines: { page: number; text: string }[]): ParseOutput {
@@ -100,10 +103,25 @@ export function parseQuestions(lines: { page: number; text: string }[]): ParseOu
       }
     }
 
-    // per-question standalone key line
+    // per-question standalone key line — bare letter, and letter+option-text forms
     const ansOnly = ANS_ONLY_RE.exec(line)
     if (ansOnly && cur && cur.options.length > 0 && cur.resolvedKey == null) {
       cur.resolvedKey = ansOnly[1].toUpperCase()
+      continue
+    }
+    const ansSentence = ANS_SENTENCE_RE.exec(line)
+    if (ansSentence && cur && cur.options.length > 0 && cur.resolvedKey == null) {
+      const letter = ansSentence[1].toUpperCase()
+      const keyOpt = cur.options.find((o) => o.key === letter)
+      // sanity: a key line whose letter is not an extracted option, or whose
+      // letter equals the LAST option while the text is a *different* option's
+      // text, is suspicious — still accept: the letter is the primary signal.
+      cur.resolvedKey = letter
+      cur.ansSentenceText = ansSentence[2]
+      if (keyOpt) {
+        // remove a glued "Answer: X. <text>" tail from the option if present
+        keyOpt.textLines = keyOpt.textLines.map((t) => t.replace(/\s*(?:ANS(?:WER)?|CORRECT(?:\s+(?:ANSWER)?)?)\s*[:\-–]\s*\(?[A-Ha-h]\)?\s*[).:]?\s*\S.*$/i, '').trim()).filter((t) => t)
+      }
       continue
     }
 
@@ -167,6 +185,18 @@ export function parseQuestions(lines: { page: number; text: string }[]): ParseOu
     const mapped = q.options.some((o) => o.key === key) ? (key as OptionKey) : null
     if (mapped) {
       q.correctAnswer = mapped
+      // cross-check: if the key line also spelled out the option's text and it
+      // clearly disagrees with the extracted option, keep the key but surface
+      // the parser's ambiguity note so the editor flags it.
+      const spelled = rq.ansSentenceText?.replace(/\s+/g, ' ').trim().toLowerCase()
+      const oi = q.options.findIndex((o) => o.key === key)
+      const optText = q.options[oi].text.replace(/\s+/g, ' ').trim().toLowerCase()
+      if (spelled && optText && !optText.includes(spelled) && !spelled.includes(optText) && !maybeSimilar(spelled, optText)) {
+        issues.push({
+          message: `Question ${rq.number ?? i + 1}: the key line spelled a different option text ("${rq.ansSentenceText}") than option ${key} ("${q.options[oi].text}"). Verify manually.`,
+          questionIndex: i,
+        })
+      }
     } else {
       q.answerIssue = 'key-option-missing'
       issues.push({
@@ -183,6 +213,7 @@ export function parseQuestions(lines: { page: number; text: string }[]): ParseOu
       if (rq.number != null && !byNumber.has(rq.number)) byNumber.set(rq.number, i)
     })
     let applied = 0
+    let matchedSkipped = 0 // entry pointed at a real question but its key was already set inline
     let ambiguous: number[] = []
     for (const { q, key } of keyBlockEntries) {
       const bankIdx = byNumber.get(q)
@@ -191,7 +222,7 @@ export function parseQuestions(lines: { page: number; text: string }[]): ParseOu
         continue
       }
       const question = questions[bankIdx]
-      if (question.correctAnswer != null) continue // inline key already applied; keep first-found
+      if (question.correctAnswer != null) { matchedSkipped++; continue } // inline key already applied; keep first-found
       const opt = question.options.find((o) => o.key === key)
       if (opt) {
         question.correctAnswer = key as OptionKey
@@ -204,7 +235,7 @@ export function parseQuestions(lines: { page: number; text: string }[]): ParseOu
         })
       }
     }
-    if (applied === 0) {
+    if (applied === 0 && matchedSkipped === 0) {
       issues.push({
         message: `An answer-key section was found with ${keyBlockEntries.length} entries, but none could be matched to extracted questions.`,
       })
@@ -212,6 +243,16 @@ export function parseQuestions(lines: { page: number; text: string }[]): ParseOu
   }
 
   return { questions, issues }
+}
+
+function maybeSimilar(a: string, b: string): boolean {
+  // crude similarity: shared distinctly-long words
+  const wa = new Set(a.split(/[^a-z0-9@]+/).filter((w) => w.length >= 4))
+  const wb = new Set(b.split(/[^a-z0-9@]+/).filter((w) => w.length >= 4))
+  if (wa.size === 0 || wb.size === 0) return true // can't judge → don't flag
+  let shared = 0
+  for (const w of wa) if (wb.has(w)) shared++
+  return shared / Math.min(wa.size, wb.size) >= 0.5
 }
 
 function parseKeyEntries(line: string): Array<{ q: number; key: string }> {
@@ -233,6 +274,14 @@ function attachOptionOrText(rq: RawQuestion, line: string, lineIdx: number, page
   if (ansTail) {
     if (rq.resolvedKey == null) rq.resolvedKey = ansTail[1].toUpperCase()
     cleaned = line.slice(0, ansTail.index).trim()
+  } else {
+    // glued sentence key on the tail of an option line: "D. Tables Answer: D. Tables"
+    const sentence = ANS_SENTENCE_RE.exec(line)
+    if (sentence && rq.options.length > 0 && rq.resolvedKey == null) {
+      rq.resolvedKey = sentence[1].toUpperCase()
+      rq.ansSentenceText = sentence[2]
+      cleaned = line.slice(0, sentence.index).trim()
+    }
   }
 
   const m = OPT_RE.exec(cleaned)
