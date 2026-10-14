@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { BankRecord } from '../types'
-import { getBank } from '../storage'
+import { getBank, putBank } from '../storage'
 import { bankStats } from '../bank'
 import { computeBatches } from '../batching'
 import type { Screen } from '../App'
@@ -30,6 +30,17 @@ export function DashboardScreen(props: { bankId: string; onGo: (s: Screen) => vo
   const startBatch = (b: { index: number; from: number; to: number }) => {
     const order = Array.from({ length: b.to - b.from + 1 }, (_, i) => b.from + i)
     props.onGo({ name: 'practice', bankId: bank.id, order, label: `Batch ${b.index + 1}`, batchSize: bank.batchSize })
+  }
+
+  // Retry a batch from scratch: clear the batch's locked answers before entering.
+  const retryBatch = (b: { index: number; from: number; to: number }) => {
+    const answers = { ...bank.answers }
+    for (let i = b.from; i <= b.to; i++) delete answers[i]
+    const updated = { ...bank, answers }
+    putBank(updated).then(() => {
+      setBank(updated)
+      startBatch(b)
+    })
   }
 
   const startRange = (idxs: number[], label: string) => {
@@ -141,6 +152,11 @@ export function DashboardScreen(props: { bankId: string; onGo: (s: Screen) => vo
                 <button className="btn small" onClick={() => startBatch(b)}>
                   {n === 0 ? 'Start Practice' : n === b.size ? 'View Results' : 'Resume Practice'}
                 </button>
+                {n > 0 && (
+                  <button className="btn secondary small" onClick={() => retryBatch(b)}>
+                    Retry batch
+                  </button>
+                )}
               </div>
             </div>
           )

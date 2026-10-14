@@ -85,7 +85,7 @@ export function ResultsScreen(props: {
           {incorrectIdx.length > 0 && (
             <button className="btn" onClick={() => openOrder(incorrectIdx, 'Retry incorrect', true)}>Retry Incorrect</button>
           )}
-          <button className="btn secondary" onClick={() => openOrder(props.order, props.label)}>Retry this batch</button>
+          <button className="btn secondary" onClick={() => openOrder(props.order, props.label, true)}>Retry this batch</button>
           {nextBatchIdx && (
             <button className="btn secondary" onClick={() => openOrder(nextBatchOrder, nextBatchLabel)}>Next batch</button>
           )}
